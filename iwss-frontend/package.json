@@ -1,0 +1,44 @@
+{
+  "name": "iwss-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "build:dev": "tsc -b && vite build --mode development",
+    "build:prod": "tsc -b && vite build --mode production",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "postinstall": "flowbite-react patch"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "apexcharts": "^5.3.5",
+    "chart.js": "^4.5.1",
+    "flowbite-react": "^0.11.9",
+    "formik": "^2.4.6",
+    "react": "^19.1.0",
+    "react-apexcharts": "^1.8.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.3",
+    "tailwindcss": "^4.2.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.0",
+    "@types/node": "^24.0.1",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "autoprefixer": "^10.4.27",
+    "eslint": "^9.25.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "flowbite-typography": "^1.0.5",
+    "globals": "^16.0.0",
+    "postcss": "^8.5.8",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.30.1",
+    "vite": "^6.3.5"
+  }
+}

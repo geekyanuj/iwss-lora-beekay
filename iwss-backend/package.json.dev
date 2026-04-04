@@ -1,0 +1,3 @@
+# Add the following dependencies to your package.json:
+# In "devDependencies" section, add:
+"nodemon": "^3.0.2"
