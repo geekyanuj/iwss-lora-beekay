@@ -30,8 +30,8 @@ export const config = {
   mqtt: {
     host: process.env.MQTT_HOST || 'localhost',
     port: process.env.MQTT_PORT || 1883,
-    username: process.env.MQTT_USERNAME || '',
-    password: process.env.MQTT_PASSWORD || '',
+    // username: process.env.MQTT_USERNAME || '',
+    // password: process.env.MQTT_PASSWORD || '',
     topic: 'iwss/+/telemetry'
   },
   cors: {

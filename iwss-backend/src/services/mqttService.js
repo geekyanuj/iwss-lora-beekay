@@ -56,14 +56,46 @@ class MQTTService {
 
     this.client.on('message', async (topic, message) => {
       try {
-        const payload = JSON.parse(message.toString());
-        const db = getDB();
+        const messageStr = message.toString();
+        let dataToStore;
+        let deviceName = topic;
+        let pm2_5, pm10;
 
-        // Look up device record by its MQTT topic (stored as deviceid)
-        const device = await db.collection('devices').findOne({ deviceid: topic });
+        logger.info(`MQTT DEBUG: Received on topic '${topic}': ${messageStr}`);
+
+        // --- NEW: Handle Master Node CSV Payload (sensors/pm topic) ---
+        // Format: "NodeName,PM2.5,PM10" (e.g. "C1-SCU1,12.5,25.0")
+        if (topic === 'sensors/pm') {
+          const parts = messageStr.split(',');
+          if (parts.length >= 3) {
+            deviceName = parts[0].trim();
+            pm2_5 = parseFloat(parts[1]);
+            pm10 = parseFloat(parts[2]);
+            dataToStore = { pm2_5, pm10, raw: messageStr };
+            logger.debug(`MQTT [Master]: Parsed CSV from ${deviceName}: PM2.5=${pm2_5}, PM10=${pm10}`);
+          } else {
+            logger.warn(`MQTT [Master]: Received malformed CSV (length ${parts.length}) on ${topic}: ${messageStr}. Expected at least 3 parts.`);
+            return;
+          }
+        } else {
+          // --- LEGACY: Handle JSON Payload (individual device topics) ---
+          try {
+            const payload = JSON.parse(messageStr);
+            dataToStore = payload.data || payload;
+            pm2_5 = dataToStore.pm2_5 !== undefined ? dataToStore.pm2_5 : dataToStore.pm25;
+            pm10 = dataToStore.pm10;
+          } catch (e) {
+            logger.warn(`MQTT: Received non-JSON message on topic ${topic}: ${messageStr}`);
+            return;
+          }
+        }
+
+        const db = getDB();
+        // Look up device record by its name (stored as deviceid)
+        const device = await db.collection('devices').findOne({ deviceid: deviceName });
 
         if (!device) {
-          logger.debug(`Unknown topic: ${topic}. Register this device in the dashboard first.`);
+          logger.warn(`MQTT WARNING: Device '${deviceName}' not found in DB. Topic was '${topic}'. Make sure you registered the device exactly with this name.`);
           return;
         }
 
@@ -76,25 +108,20 @@ class MQTTService {
 
         // Sensor telemetry: store as normal
         const clusterId = device.clusterId;
-        const data = payload.data || payload;
-
-        // Map short keys to descriptive ones if needed
-        const pm2_5 = data.pm2_5 !== undefined ? data.pm2_5 : data.pm25;
-        const pm10 = data.pm10;
 
         await db.collection('data').insertOne({
-          topic,
-          data,
+          topic: deviceName, // Store the actual device name/id even if topic was 'sensors/pm'
+          data: dataToStore,
           type: 'telemetry',
           clusterId,
           _ts: Date.now(),
         });
 
-        logger.info(`MQTT [${topic}]: Saved telemetry for sensor (Cluster ${clusterId})`);
+        logger.info(`MQTT [${deviceName}]: Saved telemetry from ${topic} (Cluster ${clusterId})`);
 
         // Trigger automatic control based on thresholds
         if (pm2_5 !== undefined || pm10 !== undefined) {
-          this._checkThresholdAndActuate(clusterId, pm2_5 || 0, pm10 || 0);
+          await this._checkThresholdAndActuate(clusterId, pm2_5 || 0, pm10 || 0);
         }
       } catch (error) {
         logger.error(`Failed to process message on topic '${topic}':`, error);
