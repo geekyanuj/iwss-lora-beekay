@@ -5,26 +5,33 @@ import logger from '../utils/logger.js';
 
 /**
  * Service to manage MQTT broker connection and data ingestion.
- *
- * Architecture notes for relay devices (Pumps / Solenoid Valves):
- * - Commands are published one-way to the device's MQTT topic (fire-and-forget).
- * - The ESP32 does NOT send back a feedback/acknowledgement message.
- * - Device status (on/off) is tracked entirely on the server side:
- *   the moment a command is published, the DB is updated immediately.
- * - Therefore incoming messages on pump/SV topics are treated as plain telemetry
- *   (or ignored), never used to derive device state.
- *
- * Only pure sensors (isPump: false, isSV: false) publish telemetry data that
- * is stored as type: 'telemetry' in the data collection.
+ * 
+ * Scalability & Robustness Updates:
+ * - Priority Queue: Sequential command delivery with 2s delay.
+ * - Feedback Verification: Tracks RCU state via 'STATE:ON/OFF' feedback.
+ * - Collision Avoidance: Ensures only one transmission happens at a time.
  */
+
+// Command Priorities
+const PRIORITY = {
+  MANUAL: 1,      // Highest: User clicks ON/OFF in dashboard
+  THRESHOLD: 2,   // High: Automatic actuation based on PM levels
+  POLL: 3         // Normal: Regular status/data polling
+};
+
 class MQTTService {
   constructor() {
     this.client = null;
     this.isConnected = false;
+    this.commandQueue = [];
+    this.isProcessing = false;
+    this.lastTransmitted = 0;
+    this.pendingFeedback = new Map(); // key: deviceId, val: { command, ts, retryCount }
+    this.INTER_COMMAND_DELAY = 1500; // 1.5 seconds minimum between transmissions
   }
 
   /**
-   * Initializes the MQTT connection and sets up message handlers.
+   * Initializes the MQTT connection and starts the queue worker.
    */
   connect() {
     const { host, port, username, password } = config.mqtt;
@@ -42,237 +49,271 @@ class MQTTService {
 
     this.client.on('connect', () => {
       this.isConnected = true;
-      logger.info(`Connected to MQTT Broker at ${url}`);
-
-      const subscriptionTopic = '#';
-      this.client.subscribe(subscriptionTopic, (err) => {
-        if (!err) {
-          logger.info(`Subscribed to all topics: ${subscriptionTopic}`);
-        } else {
-          logger.error('Failed to subscribe to MQTT topics', err);
-        }
-      });
+      logger.info(`Connected to MQTT Broker. Initializing command worker...`);
+      this.client.subscribe('#');
     });
 
     this.client.on('message', async (topic, message) => {
       try {
-        const messageStr = message.toString();
-        let dataToStore;
-        let deviceName = topic;
-        let pm2_5, pm10;
-
-        logger.info(`MQTT DEBUG: Received on topic '${topic}': ${messageStr}`);
-
-        // --- NEW: Handle Master Node CSV Payload (sensors/pm topic) ---
-        // Format: "NodeName,PM2.5,PM10" (e.g. "C1-SCU1,12.5,25.0")
-        if (topic === 'sensors/pm') {
-          const parts = messageStr.split(',');
-          if (parts.length >= 3) {
-            deviceName = parts[0].trim();
-            pm2_5 = parseFloat(parts[1]);
-            pm10 = parseFloat(parts[2]);
-            dataToStore = { pm2_5, pm10, raw: messageStr };
-            logger.debug(`MQTT [Master]: Parsed CSV from ${deviceName}: PM2.5=${pm2_5}, PM10=${pm10}`);
-          } else {
-            logger.warn(`MQTT [Master]: Received malformed CSV (length ${parts.length}) on ${topic}: ${messageStr}. Expected at least 3 parts.`);
-            return;
-          }
-        } else {
-          // --- LEGACY: Handle JSON Payload (individual device topics) ---
-          try {
-            const payload = JSON.parse(messageStr);
-            dataToStore = payload.data || payload;
-            pm2_5 = dataToStore.pm2_5 !== undefined ? dataToStore.pm2_5 : dataToStore.pm25;
-            pm10 = dataToStore.pm10;
-          } catch (e) {
-            logger.warn(`MQTT: Received non-JSON message on topic ${topic}: ${messageStr}`);
-            return;
-          }
-        }
-
+        const messageStr = message.toString().trim();
         const db = getDB();
-        // Look up device record by its name (stored as deviceid)
-        const device = await db.collection('devices').findOne({ deviceid: deviceName });
 
-        if (!device) {
-          logger.warn(`MQTT WARNING: Device '${deviceName}' not found in DB. Topic was '${topic}'. Make sure you registered the device exactly with this name.`);
-          return;
-        }
+        // 1. Handle Master Data & Feedback Topic: factory/data/<SenderID>
+        if (topic.startsWith('factory/data/')) {
+          const deviceId = topic.split('/').pop();
 
-        // Pump and SV devices do NOT send feedback — any incoming message on their
-        // topic is unexpected and should be ignored (not used to derive status).
-        if (device.isPump || device.isSV) {
-          logger.debug(`Ignoring incoming message on relay topic '${topic}' — pumps/SVs do not send feedback.`);
-          return;
-        }
+          // Check if it's Feedback (e.g. "STATE:ON" or "STATE:OFF")
+          if (messageStr.startsWith("STATE:")) {
+            const stateValue = messageStr.split(':')[1].toLowerCase(); // "on" or "off"
+            await this._handleFeedback(deviceId, stateValue);
+            return;
+          }
 
-        // Sensor telemetry: store as normal
-        const clusterId = device.clusterId;
+          // Otherwise, it's Sensor Telemetry (PM data)
+          const parts = messageStr.split(',');
+          let pm2_5, pm10;
 
-        await db.collection('data').insertOne({
-          topic: deviceName, // Store the actual device name/id even if topic was 'sensors/pm'
-          data: dataToStore,
-          type: 'telemetry',
-          clusterId,
-          _ts: Date.now(),
-        });
+          if (parts.length === 1) {
+            pm2_5 = parseFloat(parts[0]);
+            pm10 = pm2_5;
+          } else {
+            pm2_5 = parseFloat(parts[0]);
+            pm10 = parseFloat(parts[1]);
+          }
 
-        logger.info(`MQTT [${deviceName}]: Saved telemetry from ${topic} (Cluster ${clusterId})`);
-
-        // Trigger automatic control based on thresholds
-        if (pm2_5 !== undefined || pm10 !== undefined) {
-          await this._checkThresholdAndActuate(clusterId, pm2_5 || 0, pm10 || 0);
+          if (!isNaN(pm2_5)) {
+            await this._handleTelemetry(deviceId, pm2_5, pm10, messageStr);
+          }
         }
       } catch (error) {
-        logger.error(`Failed to process message on topic '${topic}':`, error);
+        logger.error(`MQTT: Error processing message on ${topic}:`, error);
       }
     });
 
-    this.client.on('close', () => {
-      this.isConnected = false;
-      logger.warn('MQTT Connection closed');
-    });
+    this.client.on('close', () => { this.isConnected = false; });
+    this.client.on('error', (err) => { this.isConnected = false; logger.error('MQTT Client Error:', err); });
 
-    this.client.on('error', (err) => {
-      this.isConnected = false;
-      logger.error('MQTT Client Error encountered:', err);
-    });
+    // Start background worker for priority queue processing
+    this._startQueueWorker();
+    
+    // Start background worker for feedback monitoring (retries)
+    this._startFeedbackMonitor();
   }
 
   /**
-   * Internal helper to check cluster thresholds against incoming sensor data
-   * and automatically actuate (ON/OFF) all pumps and SVs in that cluster.
-   *
-   * Threshold rules:
-   * - If PM2.5 > threshold OR PM10 > threshold: Turn ON all pumps/SVs.
-   * - Otherwise: Turn OFF all pumps/SVs.
-   * - Default threshold (if not set in dashboard) is PM2.5: 100, PM10: 100.
+   * Monitor for missing feedback and Offline Status.
    */
-  async _checkThresholdAndActuate(clusterId, pm2_5, pm10) {
-    try {
+  _startFeedbackMonitor() {
+    setInterval(async () => {
+      const now = Date.now();
+      const TIMEOUT = 15000;
+      const MAX_RETRIES = 2;
       const db = getDB();
-      const thresholdId = `threshold-${clusterId}`;
 
-      // Fetch thresholds for this cluster, default to 100 if not found
-      let threshold = await db.collection('thresholds').findOne({ _id: thresholdId });
-
-      const pm25Limit = (threshold && threshold.pm2_5 !== undefined) ? threshold.pm2_5 : 100;
-      const pm10Limit = (threshold && threshold.pm10 !== undefined) ? threshold.pm10 : 100;
-
-      // Determine desired state: ON if either PM level exceeds threshold
-      const shouldBeOn = pm2_5 > pm25Limit || pm10 > pm10Limit;
-      const command = shouldBeOn ? 'on' : 'off';
-
-      // Find all controllable devices (pumps + SVs) in this cluster
-      const controllableDevices = await db.collection('devices').find({
-        clusterId: parseInt(clusterId),
-        $or: [{ isPump: true }, { isSV: true }]
-      }).toArray();
-
-      if (controllableDevices.length === 0) return;
-
-      // Filter to only devices that actually need a state change to avoid MQTT spam
-      const devicesToActuate = controllableDevices.filter(d => d.status !== command);
-
-      if (devicesToActuate.length === 0) return;
-
-      logger.info(`Auto-control Logic [Cluster ${clusterId}]: PM2.5=${pm2_5}, PM10=${pm10}. Thresholds: PM2.5=${threshold.pm2_5}, PM10=${threshold.pm10}. Action: ${command.toUpperCase()} for ${devicesToActuate.length} devices.`);
-
-      // Actuate each device that needs a state change
-      for (const device of devicesToActuate) {
-        try {
-          await this.publishCommand(device.deviceid, command, clusterId);
-        } catch (err) {
-          logger.error(`Auto-control failed to actuate ${device.deviceid}:`, err);
+      // Part 1: Handle pending command feedback retries
+      for (const [deviceId, pending] of this.pendingFeedback.entries()) {
+        if (now - pending.ts > TIMEOUT) {
+          if (pending.retry < MAX_RETRIES) {
+            logger.warn(`Verification: Timeout for '${deviceId}'. Retrying (${pending.retry + 1}/${MAX_RETRIES})...`);
+            this.enqueue(deviceId, pending.payload, PRIORITY.MANUAL);
+            pending.ts = now;
+            pending.retry++;
+          } else {
+            logger.error(`Verification: FAILED for '${deviceId}' after ${MAX_RETRIES} retries.`);
+            this.pendingFeedback.delete(deviceId);
+          }
         }
       }
-    } catch (error) {
-      logger.error(`Error in auto-control logic for Cluster ${clusterId}:`, error);
+
+      // Part 2: Global Offline Monitoring (30-second heart-beat)
+      const OFFLINE_THRESHOLD = 30000;
+      await db.collection('devices').updateMany(
+        { 
+          lastSeen: { $lt: now - OFFLINE_THRESHOLD },
+          online: { $ne: false } // Only update if currently online
+        },
+        { $set: { online: false, status: 'offline' } }
+      );
+    }, 5000); // Check every 5 seconds
+  }
+
+  /**
+   * Worker to process the command queue sequentially with delays.
+   */
+  _startQueueWorker() {
+    setInterval(async () => {
+      if (this.isProcessing || this.commandQueue.length === 0 || !this.isConnected) return;
+      
+      const now = Date.now();
+      if (now - this.lastTransmitted < this.INTER_COMMAND_DELAY) return;
+
+      this.isProcessing = true;
+      
+      // Sort by priority (ascending, 1 is highest)
+      this.commandQueue.sort((a, b) => a.priority - b.priority);
+      const task = this.commandQueue.shift();
+
+      try {
+        await this._transmitNow(task.topic, task.command);
+        this.lastTransmitted = Date.now();
+      } catch (err) {
+        logger.error(`Queue: Transmission failed for ${task.topic}`, err);
+      } finally {
+        this.isProcessing = false;
+      }
+    }, 500); // Check every 500ms
+  }
+
+  /**
+   * Internal telemetry handler.
+   */
+  async _handleTelemetry(deviceId, pm2_5, pm10, raw) {
+    const db = getDB();
+    const device = await db.collection('devices').findOne({ deviceid: deviceId });
+    if (!device) return;
+
+    // Save data and mark as ONLINE (lastSeen heartbeat)
+    await db.collection('data').insertOne({
+      topic: deviceId,
+      data: { pm2_5, pm10 },
+      type: 'telemetry',
+      clusterId: device.clusterId,
+      _ts: Date.now(),
+    });
+
+    await db.collection('devices').updateOne(
+      { deviceid: deviceId },
+      { $set: { lastSeen: Date.now(), online: true } }
+    );
+
+    // Run threshold logic
+    await this._checkThresholdAndQueueActuation(deviceId, device.clusterId, pm2_5, pm10);
+  }
+
+  /**
+   * Internal feedback handler.
+   * Updates state to VERIFIED.
+   */
+  async _handleFeedback(deviceId, state) {
+    const db = getDB();
+    logger.info(`Verification: Device '${deviceId}' confirmed state: ${state.toUpperCase()}`);
+    
+    this.pendingFeedback.delete(deviceId);
+
+    // Update DB status with verification timestamp and lastSeen
+    await db.collection('devices').updateOne(
+      { deviceid: deviceId },
+      { $set: { status: state, verifiedAt: Date.now(), lastSeen: Date.now(), online: true } }
+    );
+
+    // Save as command event (historical log)
+    await db.collection('data').insertOne({
+      topic: deviceId,
+      data: { command: 'feedback', state },
+      type: 'feedback',
+      clusterId: (await db.collection('devices').findOne({ deviceid: deviceId }))?.clusterId,
+      _ts: Date.now()
+    });
+  }
+
+  /**
+   * Revised Auto-Actuation: Queues commands for all mapped RCUs and cluster-wide RCUs.
+   */
+  async _checkThresholdAndQueueActuation(sensorId, clusterId, pm2_5, pm10) {
+    const db = getDB();
+    const thresholdRecord = await db.collection('thresholds').findOne({ _id: `threshold-${clusterId}` });
+    
+    const limit25 = thresholdRecord?.pm2_5 ?? 100;
+    const limit10 = thresholdRecord?.pm10 ?? 100;
+
+    const shouldBeOn = pm2_5 > limit25 || pm10 > limit10;
+    const targetCommand = shouldBeOn ? 'on' : 'off';
+
+    // 1. Get devices specifically mapped to this sensor
+    const sensor = await db.collection('devices').findOne({ deviceid: sensorId });
+    const mappedIds = sensor?.mappedDeviceIds || [];
+
+    // 2. Get all controllable devices in the cluster (for fallback/cluster-wide control)
+    const clusterDevices = await db.collection('devices').find({
+      clusterId: parseInt(clusterId),
+      $or: [{ isPump: true }, { isSV: true }]
+    }).toArray();
+
+    // Combine targets (Union)
+    const targetDevices = new Set([...mappedIds]);
+    clusterDevices.forEach(d => targetDevices.add(d.deviceid));
+
+    // Queue commands
+    for (const deviceId of targetDevices) {
+      const device = await db.collection('devices').findOne({ deviceid: deviceId });
+      if (device && device.status !== targetCommand) {
+        this.enqueue(deviceId, targetCommand, PRIORITY.THRESHOLD);
+      }
     }
   }
 
   /**
-   * Publish a command (on/off) to a pump or SV device — fire-and-forget.
-   *
-   * Since the ESP32 does not send back a status response, the server tracks
-   * the device state itself:
-   *   1. Publish the command payload to the device's MQTT topic.
-   *   2. Immediately update the device's status in the DB to match the command.
-   *   3. Record a 'command' event in the data collection for analytics history.
-   *
-   * The frontend Pump/SV ON-OFF graph reads these 'command' events.
+   * Enqueue a command to be sent to a device.
    */
-  async publishCommand(topic, command, clusterId = null) {
-    if (!this.isConnected || !this.client) {
-      throw new Error('MQTT broker is not connected');
-    }
+  enqueue(topic, command, priority = PRIORITY.MANUAL) {
+    // Avoid redundant commands in queue
+    const exists = this.commandQueue.find(q => q.topic === topic && q.command === command);
+    if (exists) return;
 
-    // Payload format: raw string "on" or "off" as expected by the ESP32 relay hardware
-    const payload = command;
+    logger.info(`Queue: Enqueued [${priority===1?'MANUAL':priority===2?'AUTO':'POLL'}] command '${command}' for '${topic}'`);
+    this.commandQueue.push({ topic, command, priority, timestamp: Date.now() });
+  }
 
+  /**
+   * Implementation for manual dashboard control.
+   */
+  async publishCommand(topic, command) {
+    // Topic for Manual Command must follow Master Node request format: factory/req/<NodeID>
+    const fullTopic = topic.startsWith('factory/') ? topic : `factory/req/${topic}`;
+    this.enqueue(fullTopic, command, PRIORITY.MANUAL);
+    return true; 
+  }
+
+  /**
+   * Polling service wrapper.
+   */
+  async publishRaw(topic, message) {
+    // Ensure correct routing topic
+    const fullTopic = topic.startsWith('factory/') ? topic : `factory/req/${topic}`;
+    this.enqueue(fullTopic, message, PRIORITY.POLL);
+  }
+
+  /**
+   * Actual transmission to MQTT.
+   */
+  async _transmitNow(topic, payload) {
+    if (!this.isConnected || !this.client) return;
+    
     return new Promise((resolve, reject) => {
-      this.client.publish(topic, payload, { qos: 1, retain: false }, async (err) => {
-        if (err) {
-          logger.error(`Failed to publish command '${command}' to topic '${topic}':`, err);
-          reject(err);
-          return;
-        }
-
-        logger.info(`MQTT command '${command}' published to '${topic}' (fire-and-forget)`);
-
-        // Server-side state tracking — no feedback needed from the device
-        try {
-          const db = getDB();
-          const device = await db.collection('devices').findOne({ deviceid: topic });
-          const cId = clusterId || device?.clusterId;
-
-          if (cId) {
-            // 1. Persist the command event for analytics (Pump/SV ON-OFF history graph)
-            await db.collection('data').insertOne({
-              topic,
-              data: { command, state: command },
-              type: 'command',
-              clusterId: cId,
-              _ts: Date.now(),
-            });
-
-            // 2. Update the device's status in the devices collection immediately
-            await db.collection('devices').updateOne(
-              { deviceid: topic },
-              { $set: { status: command, _ts: Date.now() } }
-            );
-
-            logger.info(`Device '${topic}' status set to '${command}' (server-tracked)`);
-          }
-        } catch (dbErr) {
-          logger.warn(`Failed to persist command event for '${topic}':`, dbErr);
-        }
-
+      this.client.publish(topic, payload, { qos: 1 }, (err) => {
+        if (err) return reject(err);
+        logger.info(`MQTT: Sent '${payload}' -> '${topic}' (Waiting for Feedback)`);
+        
+        // Track for verification in-memory only (Retries handle errors)
+        this.pendingFeedback.set(topic, { payload, ts: Date.now(), retry: 0 });
+        
+        // Removed optimistic DB status update - status now only changes on verified feedback.
         resolve();
       });
     });
   }
 
-  /**
-   * Returns current status of the MQTT connection.
-   */
   getStatus() {
     return {
       connected: this.isConnected,
-      host: config.mqtt.host,
-      port: config.mqtt.port,
+      queueSize: this.commandQueue.length,
+      pendingVerification: this.pendingFeedback.size
     };
   }
 
-  /**
-   * Gracefully close the MQTT client connection.
-   */
   disconnect() {
-    if (this.client) {
-      this.client.end();
-      this.isConnected = false;
-      logger.info('MQTT Client disconnected');
-    }
+    if (this.client) this.client.end();
+    this.isConnected = false;
   }
 }
 

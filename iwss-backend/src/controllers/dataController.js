@@ -141,17 +141,22 @@ class DataController {
         return acc;
       }, {});
 
+      // Fetch global config to determine appropriate offline timeout
+      const configRecord = await db.collection('thresholds').findOne({ _id: 'global-config' });
+      const pollInterval = configRecord?.pollInterval || 5; 
+      const timeoutMs = pollInterval * 1000 * 3; // 3x buffer to allow for occasional missed packets
+
       const currentTime = Date.now();
       const lastReceivedTs = latestData?._ts || 0;
-      const isOffline = (currentTime - lastReceivedTs) > 20000;
+      const isOffline = (currentTime - lastReceivedTs) > timeoutMs;
 
-      if (isOffline) {
-        logger.warn(`Cluster ${clusterId} is semi-active or OFFLINE (No fresh data from primary sensor)`);
+      if (isOffline && latestData) {
+        logger.warn(`Cluster ${clusterId} is semi-active or OFFLINE (Last data: ${Math.round((currentTime - lastReceivedTs)/1000)}s ago. Interval: ${pollInterval}s)`);
       }
 
       const updatedDevices = devices.map(d => {
         const lastSeen = heartbeatMap[d.deviceid] || 0;
-        const isActive = (currentTime - lastSeen) < 20000;
+        const isActive = (currentTime - lastSeen) < timeoutMs;
 
         // For pure sensors (non-pump, non-SV), redefine 'status' based on activity
         if (!d.isPump && !d.isSV) {
@@ -222,36 +227,6 @@ class DataController {
   /**
    * Generate synthetic sensor data for testing.
    */
-  async generateMockData(req, res, next) {
-    try {
-      const db = getDB();
-      const { clusterId = 1, days = 30 } = req.body;
-      const mockData = [];
-      const now = new Date();
-
-      for (let i = 0; i < days; i++) {
-        const timestamp = now.getTime() - i * 24 * 60 * 60 * 1000;
-        mockData.push({
-          topic: '01',
-          data: {
-            pm2_5: Math.random() * 100,
-            pm10: Math.random() * 150,
-            humidity: Math.random() * 100,
-            temperature: 20 + Math.random() * 15,
-            sprinkler: Math.random() > 0.5 ? 'on' : 'off',
-          },
-          type: 'telemetry',
-          clusterId: parseInt(clusterId),
-          _ts: timestamp,
-        });
-      }
-
-      await db.collection('data').insertMany(mockData);
-      res.json({ message: `Generated ${mockData.length} mock data points`, count: mockData.length });
-    } catch (error) {
-      next(error);
-    }
-  }
   /**
    * Fetch pump and solenoid valve ON/OFF command history for analytics.
    *
@@ -302,20 +277,7 @@ class DataController {
         .limit(parseInt(limit))
         .toArray();
 
-      // If no command history yet, synthesise one data point per device from
-      // the device's current status in the devices collection, so the chart
-      // always has something to render.
-      const eventsSource = commandEvents.length > 0
-        ? commandEvents
-        : controllableDevices.map(d => ({
-            _ts: d._ts || Date.now(),
-            topic: d.deviceid,
-            data: { command: d.status || 'off', state: d.status || 'off' },
-            type: 'command',
-            clusterId: d.clusterId,
-          }));
-
-      const events = eventsSource.map(e => ({
+      const events = commandEvents.map(e => ({
         time: e._ts,
         topic: e.topic,
         state: e.data?.command || e.data?.state || 'off',

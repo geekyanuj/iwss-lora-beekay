@@ -20,8 +20,6 @@ router.get('/cluster/:clusterId/home-page-data', dataController.getHomepageData)
 // Record incoming telemetry from devices
 router.post('/data', dataController.recordData);
 
-// Diagnostic: Generate fake historical data for testing
-router.post('/generate-mock-data', dataController.generateMockData);
 
 // Fetch pump/SV ON-OFF status history for analytics graph (real-time with 5s refresh)
 router.get('/cluster/:clusterId/pump-sv-history', dataController.getPumpSvStatusHistory);

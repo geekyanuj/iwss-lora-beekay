@@ -18,10 +18,14 @@ async function startServer() {
     logger.info('Initializing MQTT Broker connection...');
     mqttService.connect();
 
-    // 3. Initialize and configure Express app
+    // 3. Initialize Polling Service (Talk When Spoken To architecture)
+    const pollingService = (await import('./services/pollingService.js')).default;
+    pollingService.start();
+
+    // 4. Initialize and configure Express app
     const app = createApp();
 
-    // 4. Start listening for network requests
+    // 5. Start listening for network requests
     app.listen(config.port, () => {
       logger.info(`Server is running on http://localhost:${config.port}`);
       logger.info(`Environment: ${config.env}`);

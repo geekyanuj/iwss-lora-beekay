@@ -59,15 +59,13 @@ class DeviceController {
   async registerDevice(req, res, next) {
     try {
       const db = getDB();
-      const { topic, isPump = false, isSV = false, clusterId, x, y } = req.body;
+      const { topic, deviceName, isPump = false, isSV = false, clusterId, x, y, mappedDeviceIds = [] } = req.body;
 
       if (!topic || !clusterId) {
         return res.status(400).json({ error: 'topic and clusterId are required' });
       }
 
       // ── Duplicate topic guard ──────────────────────────────────────────────
-      // MQTT topics must be globally unique. Two devices sharing the same topic
-      // would both respond to every ON/OFF command, creating unsafe behaviour.
       const existing = await db.collection('devices').findOne({ deviceid: topic });
       if (existing) {
         const existingType = existing.isPump ? 'Pump' : existing.isSV ? 'Solenoid Valve' : 'Sensor';
@@ -82,28 +80,28 @@ class DeviceController {
           },
         });
       }
-      // ──────────────────────────────────────────────────────────────────────
 
       const devicePlacementX = x !== undefined ? parseFloat(x) : Math.random() * 100;
       const devicePlacementY = y !== undefined ? parseFloat(y) : Math.random() * 100;
 
-      // Ensure a unique index exists on deviceid (idempotent — safe to call repeatedly)
       await db.collection('devices').createIndex({ deviceid: 1 }, { unique: true, background: true });
 
       await db.collection('devices').insertOne({
-        deviceid: topic,
+        deviceid: topic,        // Numerical Node ID (e.g. 101)
+        deviceName: deviceName, // Human Name (e.g. C1SCU1)
         status: 'off',
         clusterId: parseInt(clusterId),
         isPump: Boolean(isPump),
         isSV: Boolean(isSV),
+        mappedDeviceIds: Array.isArray(mappedDeviceIds) ? mappedDeviceIds : [],
         x: devicePlacementX,
         y: devicePlacementY,
         _ts: Date.now(),
       });
 
-      logger.info(`New device registered: ${topic} (Cluster ${clusterId}, isPump: ${isPump}, isSV: ${isSV})`);
+      logger.info(`New device registered: ${topic} [${deviceName}] (Cluster ${clusterId}, isPump: ${isPump}, isSV: ${isSV})`);
       res.json({
-        message: `Device '${topic}' registered successfully`,
+        message: `Device '${deviceName}' (${topic}) registered successfully`,
       });
     } catch (error) {
       // MongoDB duplicate key error (E11000) — belt-and-suspenders if the
@@ -119,24 +117,26 @@ class DeviceController {
   }
 
   /**
-   * Update the operational status of a specific device.
+   * Update the operational status or config of a specific device.
    */
   async updateDeviceStatus(req, res, next) {
     try {
       const db = getDB();
       const { deviceId } = req.params;
-      const { status } = req.body;
+      const { status, mappedDeviceIds } = req.body;
 
-      if (!status) {
-        return res.status(400).json({ error: 'status is required' });
+      const updateData = { _ts: Date.now() };
+      if (status) updateData.status = status;
+      if (mappedDeviceIds !== undefined) {
+          updateData.mappedDeviceIds = Array.isArray(mappedDeviceIds) ? mappedDeviceIds : [mappedDeviceIds];
       }
 
       await db
         .collection('devices')
-        .updateOne({ deviceid: deviceId }, { $set: { status, _ts: Date.now() } });
+        .updateOne({ deviceid: deviceId }, { $set: updateData });
 
-      logger.info(`Device ${deviceId} status changed to ${status}`);
-      res.json({ message: `Device '${deviceId}' status updated to '${status}'` });
+      logger.info(`Device ${deviceId} properties updated: ${JSON.stringify(updateData)}`);
+      res.json({ message: `Device '${deviceId}' updated successfully`, data: updateData });
     } catch (error) {
       next(error);
     }

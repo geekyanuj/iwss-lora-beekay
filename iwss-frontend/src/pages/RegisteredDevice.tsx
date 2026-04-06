@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { get, post, del } from "../services";
 import { useToast } from "../context/ToastContext";
 
 type Device = {
   _id: string;
-  deviceid: string;
+  deviceid: string;     // Numerical ID (e.g. 101)
+  deviceName?: string;  // Human Name (e.g. C1SCU1)
   _ts: number;
   isPump: boolean;
   isSV: boolean;
@@ -12,10 +13,6 @@ type Device = {
   status?: string;
 };
 
-type GetDeviceResponse = {
-  message: string;
-  data: Device[];
-};
 
 function getDeviceType(device: Device): "sensor" | "sv" | "pump" {
   if (device.isPump) return "pump";
@@ -36,37 +33,48 @@ function RegisteredDevices({ cluster }: { cluster?: number }) {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const { addToast } = useToast();
+  const prevStatusRef = useRef<Record<string, string>>({});
 
-  const fetchDevices = () => {
-    setLoading(true);
-    get(`cluster/${cluster}/get-devices`, {})
-      .then((response: GetDeviceResponse) => {
-        setRegdDevices(response.data);
-      })
-      .catch(err => {
-        console.error(err);
-        addToast("Failed to fetch devices", "error");
-      })
-      .finally(() => setLoading(false));
-  };
+  const fetchDevices = useCallback(async () => {
+    try {
+      const res = await get(`cluster/${cluster}/get-devices`, {});
+      const newDevices = res.data;
+      
+      // Check for state changes to trigger "Verified" alerts
+      newDevices.forEach((d: Device) => {
+        const oldStatus = prevStatusRef.current[d.deviceid];
+        if (oldStatus === 'pending' && (d.status === 'on' || d.status === 'off')) {
+          addToast(`COMMAND VERIFIED: ${d.deviceName || d.deviceid} is now ${d.status.toUpperCase()}`, "success");
+        } else if (oldStatus && oldStatus !== 'error' && d.status === 'error') {
+          addToast(`COMMUNICATION ERROR: ${d.deviceName || d.deviceid} is unreachable`, "error");
+        }
+        prevStatusRef.current[d.deviceid] = d.status || '';
+      });
 
+      setRegdDevices(newDevices);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  }, [cluster, addToast]);
+
+  // Live Auto-Refresh (SPA Feel)
   useEffect(() => {
     fetchDevices();
-  }, [cluster]);
+    const interval = setInterval(fetchDevices, 5000);
+    return () => clearInterval(interval);
+  }, [fetchDevices]);
 
   const sendCommand = (deviceid: string, command: "on" | "off") => {
     setSendingCommand(prev => ({ ...prev, [deviceid]: true }));
     post("send-command", { topic: deviceid, command })
       .then(() => {
-        addToast(`${deviceid.split('/').pop()} turned ${command.toUpperCase()}`, "success");
-        // Update status locally for immediate feedback
-        setRegdDevices(prev => prev.map(d => 
-          d.deviceid === deviceid ? { ...d, status: command } : d
-        ));
+        addToast(`Command queued for ${deviceid.split('/').pop()}... awaiting feedback.`, "warning");
       })
       .catch(err => {
         console.error(err);
-        addToast(`Failed to turn ${command.toUpperCase()} ${deviceid.split('/').pop()}`, "error");
+        addToast("Failed to queue command", "error");
       })
       .finally(() => {
         setSendingCommand(prev => ({ ...prev, [deviceid]: false }));
@@ -198,9 +206,12 @@ function RegisteredDevices({ cluster }: { cluster?: number }) {
                   <tr key={device._id || i} className={isDeleting ? "opacity-40" : ""}>
                     <td className="text-gray-400 font-mono text-xs">{i + 1}</td>
                     <td className="font-medium text-gray-900">
-                      <div className="flex items-center gap-2">
-                        <span className="text-base">{meta.icon}</span>
-                        <span className="font-mono text-sm">{device.deviceid}</span>
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">{meta.icon}</span>
+                          <span className="font-black text-sm text-blue-900 uppercase tracking-tight">{device.deviceName || 'Unnamed'}</span>
+                        </div>
+                        <span className="text-[10px] font-mono text-gray-400 ml-6 tracking-widest">LoRa ID: {device.deviceid}</span>
                       </div>
                     </td>
                     <td>
@@ -210,13 +221,21 @@ function RegisteredDevices({ cluster }: { cluster?: number }) {
                     </td>
                     <td>
                       {isControllable ? (
-                        <span className={`px-2 py-1 rounded-full text-xs font-bold uppercase ${
-                          device.status === 'on' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
-                        }`}>
-                          {device.status || 'off'}
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <span className={`px-2 py-1 rounded-full text-[10px] font-black uppercase text-center w-fit ${
+                            device.status === 'on' ? 'bg-green-100 text-green-700 border border-green-200' : 
+                            device.status === 'pending' ? 'bg-yellow-50 text-yellow-600 border border-yellow-100 animate-pulse' :
+                            device.status === 'error' ? 'bg-red-50 text-red-600 border border-red-100' :
+                            'bg-gray-100 text-gray-500 border border-gray-200'
+                          }`}>
+                            {device.status === 'pending' ? '⌛ PENDING' : 
+                             device.status === 'error' ? '🚫 ERROR' : 
+                             device.status === 'on' ? '✔️ ON (VERIFIED)' : 
+                             '⚪ OFF'}
+                          </span>
+                        </div>
                       ) : (
-                        <span className="text-gray-400 text-xs">Read-only</span>
+                        <span className="text-gray-400 text-[10px] uppercase font-bold tracking-widest">Telemetry Only</span>
                       )}
                     </td>
                     <td className="text-right">
