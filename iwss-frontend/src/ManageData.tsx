@@ -3,10 +3,11 @@ import RegisteredDevices from "./pages/RegisteredDevice";
 import DeviceData from "./pages/DeviceData";
 import Register from "./pages/Register";
 import Configure from "./pages/Configure";
+import Mapping from "./pages/Mapping";
 import { CLUSTERS, type ClusterType } from "./constants";
 import { FadeIn, SlideIn } from "./components/Animations/Transitions";
 
-const TABS = ["Registered device list", "Device Data", "Register", "Configure"];
+const TABS = ["Registered Device List", "Mapping (SCU -> RCU)", "Device Data", "Register", "Configure"];
 
 export default function Cluster() {
   const [clusterTab, setClusterTab] = useState<ClusterType | null>(CLUSTERS[0]);
@@ -89,9 +90,10 @@ function ManageDataContent({ cluster }: { cluster: ClusterType }) {
       <FadeIn key={currentTab} duration={300}>
         <div className="bg-gray-50 rounded-xl p-4 md:p-6 border border-gray-100">
           {currentTab === 0 && <RegisteredDevices cluster={cluster?.id} />}
-          {currentTab === 1 && <DeviceData cluster={cluster?.id} />}
-          {currentTab === 2 && <Register cluster={cluster?.id} />}
-          {currentTab === 3 && <Configure cluster={cluster?.id} />}
+          {currentTab === 1 && <Mapping cluster={cluster?.id} />}
+          {currentTab === 2 && <DeviceData cluster={cluster?.id} />}
+          {currentTab === 3 && <Register cluster={cluster?.id} />}
+          {currentTab === 4 && <Configure cluster={cluster?.id} />}
         </div>
       </FadeIn>
     </div>

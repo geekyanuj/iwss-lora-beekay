@@ -223,31 +223,33 @@ class MQTTService {
     const db = getDB();
     const thresholdRecord = await db.collection('thresholds').findOne({ _id: `threshold-${clusterId}` });
     
+    // Default thresholds if not explicitly set
     const limit25 = thresholdRecord?.pm2_5 ?? 100;
     const limit10 = thresholdRecord?.pm10 ?? 100;
 
     const shouldBeOn = pm2_5 > limit25 || pm10 > limit10;
-    const targetCommand = shouldBeOn ? 'on' : 'off';
+    const targetState = shouldBeOn ? 'on' : 'off';
 
     // 1. Get devices specifically mapped to this sensor
     const sensor = await db.collection('devices').findOne({ deviceid: sensorId });
     const mappedIds = sensor?.mappedDeviceIds || [];
 
-    // 2. Get all controllable devices in the cluster (for fallback/cluster-wide control)
-    const clusterDevices = await db.collection('devices').find({
-      clusterId: parseInt(clusterId),
-      $or: [{ isPump: true }, { isSV: true }]
-    }).toArray();
+    if (mappedIds.length === 0) {
+        return;
+    }
 
-    // Combine targets (Union)
-    const targetDevices = new Set([...mappedIds]);
-    clusterDevices.forEach(d => targetDevices.add(d.deviceid));
-
-    // Queue commands
-    for (const deviceId of targetDevices) {
-      const device = await db.collection('devices').findOne({ deviceid: deviceId });
-      if (device && device.status !== targetCommand) {
-        this.enqueue(deviceId, targetCommand, PRIORITY.THRESHOLD);
+    // 2. Queue commands for mapped RCUs
+    for (const deviceId of mappedIds) {
+      const rcuDevice = await db.collection('devices').findOne({ deviceid: deviceId });
+      
+      // Only send command if the target state is different from the current verified status
+      if (rcuDevice && rcuDevice.status !== targetState) {
+        // IMPORTANT: The Master Node expects factory/req/<NodeID> topic structure
+        const fullTopic = `factory/req/${deviceId}`;
+        
+        logger.info(`Auto-Actuation: ${sensorId} reports PM2.5=${pm2_5}, PM10=${pm10}. Triggering ${targetState.toUpperCase()} for mapped RCU ${deviceId} (Topic: ${fullTopic})`);
+        
+        this.enqueue(fullTopic, targetState, PRIORITY.THRESHOLD);
       }
     }
   }

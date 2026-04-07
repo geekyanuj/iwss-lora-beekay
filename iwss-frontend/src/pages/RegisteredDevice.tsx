@@ -21,9 +21,9 @@ function getDeviceType(device: Device): "sensor" | "sv" | "pump" {
 }
 
 const DEVICE_TYPE_META = {
-  sensor: { label: "Sensor", icon: "📡", badgeClass: "bg-blue-100 text-blue-800", pillClass: "bg-blue-500" },
-  sv: { label: "Solenoid Valve", icon: "🔧", badgeClass: "bg-orange-100 text-orange-800", pillClass: "bg-orange-500" },
-  pump: { label: "Pump", icon: "💧", badgeClass: "bg-purple-100 text-purple-800", pillClass: "bg-purple-500" },
+  sensor: { label: "Sensor Control Unit (SCU)", icon: "📡", badgeClass: "bg-blue-100 text-blue-800", pillClass: "bg-blue-500" },
+  sv: { label: "Relay Control Unit (RCU - SV)", icon: "🔧", badgeClass: "bg-orange-100 text-orange-800", pillClass: "bg-orange-500" },
+  pump: { label: "Relay Control Unit (RCU - Pump)", icon: "💧", badgeClass: "bg-purple-100 text-purple-800", pillClass: "bg-purple-500" },
 };
 
 function RegisteredDevices({ cluster }: { cluster?: number }) {
@@ -133,13 +133,13 @@ function RegisteredDevices({ cluster }: { cluster?: number }) {
       {regdDevices.length > 0 && (
         <div className="flex flex-wrap gap-2">
           <span className="px-3 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">
-            📡 {sensorCount} Sensor{sensorCount !== 1 ? 's' : ''}
+            📡 {sensorCount} SCU{sensorCount !== 1 ? 's' : ''}
           </span>
           <span className="px-3 py-1 rounded-full text-xs font-semibold bg-orange-100 text-orange-700">
-            🔧 {svCount} Solenoid Valve{svCount !== 1 ? 's' : ''}
+            🔧 {svCount} SV-RCU{svCount !== 1 ? 's' : ''}
           </span>
           <span className="px-3 py-1 rounded-full text-xs font-semibold bg-purple-100 text-purple-700">
-            💧 {pumpCount} Pump{pumpCount !== 1 ? 's' : ''}
+            💧 {pumpCount} Pump-RCU{pumpCount !== 1 ? 's' : ''}
           </span>
         </div>
       )}

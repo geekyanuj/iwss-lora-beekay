@@ -58,7 +58,7 @@ export type HealthResponse = {
 };
 
 function EnhancedHome() {
-  const [selectedClusterData, setSelectedClusterData] = useState<{ id: number; name: string } | null>(null);
+  const [selectedClusterData, setSelectedClusterData] = useState<{ id: number; name: string; description: string } | null>(null);
   const [mqttStatus, setMqttStatus] = useState<HealthResponse['mqtt'] | null>(null);
 
   useEffect(() => {
@@ -122,7 +122,7 @@ export default EnhancedHome;
 function EnhancedClusterCard({
   cluster,
 }: {
-  cluster: { id: number; name: string };
+  cluster: { id: number; name: string; description: string };
 }) {
   const [homepageData, setHomepageData] = useState<HomePageData | null>(null);
   const fetchData = async () => {
@@ -165,7 +165,10 @@ function EnhancedClusterCard({
             <h2 className="text-2xl font-bold text-gray-900">
               {cluster.name}
             </h2>
-            <p className={`text-sm font-medium mt-1 transition-colors duration-300 ${isOffline ? "text-gray-500" : "text-green-600"}`}>
+            <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-1">
+              {cluster.description}
+            </p>
+            <p className={`text-sm font-medium transition-colors duration-300 ${isOffline ? "text-gray-500" : "text-green-600"}`}>
               {isOffline ? "🔴 Offline" : "🟢 Online"}
             </p>
           </div>
@@ -205,7 +208,7 @@ function ClusterDetailModal({
   cluster, 
   onClose 
 }: { 
-  cluster: { id: number; name: string }; 
+  cluster: { id: number; name: string; description: string }; 
   onClose: () => void 
 }) {
   const { addToast } = useToast();

@@ -398,7 +398,7 @@ const EnhancedAnalytics: React.FC = () => {
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center text-xl">⚡</div>
                 <div>
-                  <h3 className="text-base font-bold text-gray-800">Pump & Solenoid Valve — ON/OFF Timeline</h3>
+                  <h3 className="text-base font-bold text-gray-800">Relay Control Unit (RCU) — ON/OFF Timeline</h3>
                   <p className="text-xs text-gray-400">Real-time status tracking · Updates every 5 seconds</p>
                 </div>
               </div>
@@ -463,7 +463,7 @@ const EnhancedAnalytics: React.FC = () => {
                   onChange={e => setSelectedPumpDevice(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-400"
                 >
-                  <option value="">All Pumps & SVs</option>
+                  <option value="">All RCUs</option>
                   {pumpSvDevices.map(d => (
                     <option key={d.deviceid} value={d.deviceid}>
                       {d.isSV ? '🔧' : '💧'} {d.deviceid}
@@ -555,9 +555,9 @@ const EnhancedAnalytics: React.FC = () => {
             ) : (
               <div className="flex flex-col justify-center items-center h-56 text-gray-400 gap-3">
                 <span className="text-5xl">⚡</span>
-                <p className="text-sm font-medium">No pump/SV events found</p>
+                <p className="text-sm font-medium">No RCU events found</p>
                 <p className="text-xs text-gray-400 text-center">
-                  Register pump or solenoid valve devices and send ON/OFF commands to see the timeline.
+                  Register Relay Control Units (RCU) and send ON/OFF commands to see the timeline.
                   <br />Data refreshes automatically every 5 seconds.
                 </p>
               </div>

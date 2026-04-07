@@ -13,4 +13,4 @@ export const TABS = [
   "Configure",
 ];
 export const API_BASE_URL = "http://localhost:3001/api/"; // Change this to your backend URL
-export type ClusterType = { id: number; name: string };
+export type ClusterType = { id: number; name: string; description: string };

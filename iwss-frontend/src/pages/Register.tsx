@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { post, get } from "../services";
+import { useState } from "react";
+import { post } from "../services";
 import { useToast } from "../context/ToastContext";
 import { Button } from "flowbite-react";
 
@@ -7,19 +7,19 @@ type DeviceType = "sensor" | "sv" | "pump";
 
 const DEVICE_TYPE_CONFIG: Record<DeviceType, { label: string; icon: string; description: string; color: string }> = {
   sensor: {
-    label: "Sensor",
+    label: "Sensor Control Unit (SCU)",
     icon: "📡",
     description: "Reads environmental data (PM2.5, PM10, etc.)",
     color: "blue",
   },
   sv: {
-    label: "Solenoid Valve (SV)",
+    label: "Relay Control Unit (RCU - SV)",
     icon: "🔧",
     description: "Relay-controlled valve — controlled via MQTT topic",
     color: "orange",
   },
   pump: {
-    label: "Pump",
+    label: "Relay Control Unit (RCU - Pump)",
     icon: "💧",
     description: "Relay-controlled pump — controlled via MQTT topic",
     color: "purple",
@@ -34,37 +34,16 @@ function Register({ cluster }: { cluster?: number }) {
   const [loading, setLoading] = useState(false);
   const [duplicateError, setDuplicateError] = useState<{ detail: string; existingCluster?: number; existingType?: string } | null>(null);
   
-  const [mappedDeviceIds, setMappedDeviceIds] = useState<string[]>([]);
-  const [clusterDevices, setClusterDevices] = useState<{ deviceid: string; deviceName?: string }[]>([]);
-  
   const { addToast } = useToast();
 
   const clusterId = cluster || 1;
-  const typeCode = deviceType === "sensor" ? 0 : 1; // 0 for sensor/SCU, 1 for SV
-  const typeLabel = deviceType === "sensor" ? "SCU" : deviceType === "sv" ? "SV" : "PUMP";
+  const typeCode = deviceType === "sensor" ? 0 : 1; // 0 for sensor/SCU, 1 for SV/Pump
+  const typeLabel = deviceType === "sensor" ? "SCU" : "RCU";
   
-  // Fetch existing controllable devices in the cluster for mapping
-  useEffect(() => {
-    if (deviceType === "sensor") {
-      get(`cluster/${clusterId}/get-devices`, {})
-        .then(res => {
-          const controllable = res.data.filter((d: any) => d.isPump || d.isSV);
-          setClusterDevices(controllable);
-        })
-        .catch(err => console.error("Failed to fetch devices for mapping", err));
-    }
-  }, [clusterId, deviceType]);
-
-  const toggleMappedDevice = (id: string) => {
-    setMappedDeviceIds(prev => 
-      prev.includes(id) ? prev.filter(mid => mid !== id) : [...prev, id]
-    );
-  };
-
   // Calculate Node ID (e.g. 101, 111)
   const calcNodeId = (clusterId * 100) + (typeCode * 10) + (parseInt(deviceNumber) || 1);
   // Calculate Human Name (e.g. C1SCU1)
-  const calcHumanName = `C${clusterId}${typeLabel}${deviceNumber}`;
+  const calcHumanName = `C${clusterId}${typeLabel}${deviceNumber === "1" ? "" : deviceNumber}`; // Default C1SCU, C1RCU if 1
 
   const handleRegister = async () => {
     setDuplicateError(null);
@@ -79,7 +58,7 @@ function Register({ cluster }: { cluster?: number }) {
         clusterId: clusterId,
         x: xPlacement,
         y: yPlacement,
-        mappedDeviceIds: deviceType === "sensor" ? mappedDeviceIds : [],
+        mappedDeviceIds: [], // Mapping moved to separate tab
       });
 
       if (result?.error) {
@@ -182,7 +161,7 @@ function Register({ cluster }: { cluster?: number }) {
                   }}
                 />
                 <span className="text-3xl mb-2">{config.icon}</span>
-                <span className="text-[10px] font-black uppercase tracking-wider">{config.label}</span>
+                <span className="text-[9px] font-black uppercase tracking-wider text-center">{config.label}</span>
               </label>
             ))}
           </div>
@@ -212,32 +191,6 @@ function Register({ cluster }: { cluster?: number }) {
             />
           </div>
         </div>
-
-        {/* Multi-Mapping Section */}
-        {deviceType === "sensor" && clusterDevices.length > 0 && (
-          <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100 space-y-3">
-             <div className="flex items-center gap-2 mb-1">
-                <span className="text-sm font-bold text-gray-800">Assign Action Mappings</span>
-                <span className="text-[10px] bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded font-black uppercase">SCU -&gt; RCUs</span>
-             </div>
-             <p className="text-xs text-gray-500 mb-2">When this sensor hits threshold, these devices will turn ON automatically.</p>
-             <div className="flex flex-wrap gap-2">
-                {clusterDevices.map(d => (
-                  <button
-                    key={d.deviceid}
-                    onClick={() => toggleMappedDevice(d.deviceid)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all border-2 ${
-                      mappedDeviceIds.includes(d.deviceid)
-                        ? "bg-blue-600 text-white border-blue-600 shadow-sm"
-                        : "bg-white text-gray-500 border-gray-100 hover:border-blue-200"
-                    }`}
-                  >
-                    {d.deviceName || d.deviceid}
-                  </button>
-                ))}
-             </div>
-          </div>
-        )}
       </div>
 
       <div className="pt-4">

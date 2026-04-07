@@ -116,21 +116,17 @@ class DataController {
         .find({ clusterId: parseInt(clusterId) })
         .toArray();
 
-      // Find the primary sensor for this cluster (the first one registered)
-      const primarySensor = await db.collection('devices')
-        .findOne({ clusterId: parseInt(clusterId), isPump: false }, { sort: { _ts: 1 } });
+      // Find all SCU (Sensor Control Units) - excluding pumps and solenoid valves
+      const scus = devices.filter(d => !d.isPump && !d.isSV);
+      const rcus = devices.filter(d => d.isPump || d.isSV);
 
-      let latestData = null;
-      if (primarySensor) {
-        latestData = await db.collection('data')
-          .findOne({ topic: primarySensor.deviceid, type: 'telemetry' }, { sort: { _ts: -1 } });
-      } else {
-        // Fallback: Just grab the latest telemetry for the whole cluster if no specific sensor known yet
-        latestData = await db.collection('data')
-          .findOne({ clusterId: parseInt(clusterId), type: 'telemetry' }, { sort: { _ts: -1 } });
-      }
+      // Fetch global config to determine appropriate offline timeout
+      const configRecord = await db.collection('thresholds').findOne({ _id: 'global-config' });
+      const pollInterval = configRecord?.pollInterval || 5; 
+      const timeoutMs = pollInterval * 1000 * 3; // 3x buffer
+      const currentTime = Date.now();
 
-      // Get latest signal timestamps for all devices in this cluster (matched by topic) to determine online/offline status
+      // Get latest signal timestamps for all devices in this cluster to determine online/offline status
       const latestHeartbeats = await db.collection('data').aggregate([
         { $match: { topic: { $in: devices.map(d => d.deviceid) }, type: 'telemetry' } },
         { $group: { _id: "$topic", lastSeen: { $max: "$_ts" } } }
@@ -141,24 +137,31 @@ class DataController {
         return acc;
       }, {});
 
-      // Fetch global config to determine appropriate offline timeout
-      const configRecord = await db.collection('thresholds').findOne({ _id: 'global-config' });
-      const pollInterval = configRecord?.pollInterval || 5; 
-      const timeoutMs = pollInterval * 1000 * 3; // 3x buffer to allow for occasional missed packets
+      // Determine which SCUs are online and find the most descriptive latest data
+      const onlineScus = scus.filter(s => {
+        const lastSeen = heartbeatMap[s.deviceid] || 0;
+        return (currentTime - lastSeen) < timeoutMs;
+      });
 
-      const currentTime = Date.now();
-      const lastReceivedTs = latestData?._ts || 0;
-      const isOffline = (currentTime - lastReceivedTs) > timeoutMs;
+      // Sort online SCUs by latest seen to pick the "best" source
+      onlineScus.sort((a, b) => (heartbeatMap[b.deviceid] || 0) - (heartbeatMap[a.deviceid] || 0));
 
-      if (isOffline && latestData) {
-        logger.warn(`Cluster ${clusterId} is semi-active or OFFLINE (Last data: ${Math.round((currentTime - lastReceivedTs)/1000)}s ago. Interval: ${pollInterval}s)`);
+      const primaryScu = onlineScus.length > 0 ? onlineScus[0] : (scus.sort((a,b) => (b._ts || 0) - (a._ts || 0))[0] || null);
+      
+      let latestData = null;
+      if (primaryScu) {
+        latestData = await db.collection('data')
+          .findOne({ topic: primaryScu.deviceid, type: 'telemetry' }, { sort: { _ts: -1 } });
       }
+
+      const clusterIsOnline = onlineScus.length > 0;
+      const lastReceivedTs = latestData?._ts || 0;
 
       const updatedDevices = devices.map(d => {
         const lastSeen = heartbeatMap[d.deviceid] || 0;
         const isActive = (currentTime - lastSeen) < timeoutMs;
 
-        // For pure sensors (non-pump, non-SV), redefine 'status' based on activity
+        // For SCUs, status is simply active or not
         if (!d.isPump && !d.isSV) {
           return { ...d, status: isActive ? 'on' : 'off' };
         }
@@ -166,27 +169,27 @@ class DataController {
       });
 
       const pumpStats = {
-        on: updatedDevices.filter(d => (d.isPump || d.isSV) && d.status === 'on').length,
-        off: updatedDevices.filter(d => (d.isPump || d.isSV) && d.status === 'off').length
+        on: rcus.filter(d => updatedDevices.find(ud => ud.deviceid === d.deviceid)?.status === 'on').length,
+        off: rcus.filter(d => updatedDevices.find(ud => ud.deviceid === d.deviceid)?.status !== 'on').length
       };
 
-      const sprinklerStats = {
-        on: updatedDevices.filter(d => !d.isPump && !d.isSV && d.status === 'on').length,
-        off: updatedDevices.filter(d => !d.isPump && !d.isSV && d.status === 'off').length
+      const scuStats = {
+        on: onlineScus.length,
+        off: scus.length - onlineScus.length
       };
 
       res.json({
         message: 'Homepage data fetched',
         data: {
           allDevices: updatedDevices,
-          primaryDeviceId: primarySensor?.deviceid || null,
+          primaryDeviceId: primaryScu?.deviceid || null,
           disableControl: false,
           lastReceivedTs,
-          isOffline,
-          sprinkler: sprinklerStats,
+          isOffline: !clusterIsOnline,
+          sprinkler: scuStats,
           devices: {
-            sprinkler: updatedDevices.filter(d => !d.isPump && !d.isSV).length,
-            pump: updatedDevices.filter(d => d.isPump || d.isSV).length
+            sprinkler: scus.length,
+            pump: rcus.length
           },
           pump: pumpStats,
           pm10: latestData?.data?.pm10 || 0,
